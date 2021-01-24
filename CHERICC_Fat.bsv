@@ -233,8 +233,7 @@ function CapFat unpackCap(Capability thin);
   BoundsEmbeddedExp tmp = unpack(memCap.bounds);
   Exp potentialExp = unpack({tmp.expTopHalf,tmp.expBotHalf});
   Bit#(MW) potentialAddrBits = truncate(memCap.address >> potentialExp);
-  fat.addrBits = tmp.embeddedExp ? potentialAddrBits
-                                 : truncate(memCap.address);
+  fat.addrBits = (f == EmbeddedExp) ? potentialAddrBits : truncate(memCap.address);
   return fat;
 endfunction
 
@@ -691,12 +690,14 @@ typedef struct {
   Exp exp;
   Bit#(MW) topBits;
   Bit#(MW) baseBits;
+  Bool overflow;
 } Bounds deriving (Bits, Eq, FShow);
 instance DefaultValue #(Bounds);
   defaultValue = Bounds {
       exp     : resetExp
     , topBits : resetTop
-    , baseBits: 0 };
+    , baseBits: 0
+    , overflow: False };
 endinstance
 instance DefaultValue #(CapFat);
   defaultValue = CapFat {
@@ -768,27 +769,31 @@ typedef struct {
 } BoundsEmbeddedExp deriving(Bits, Eq, FShow);
 
 function Tuple2#(Format, Bounds) decBounds (CBounds raw);
-  Bool embeddedExp = (truncateLSB(raw)==1'b1);
-  Format format    = (embeddedExp) ? EmbeddedExp : Exp0;
   Bounds bounds    = defaultValue;
-  //bounds.exp      = 0;
-  //bounds.topBits  = 0;
-  //bounds.baseBits = 0;
+
+  BoundsEmbeddedExp bEmb = unpack(raw);
+  BoundsExp0 b0          = unpack(raw);
+  Exp exp                = unpack({bEmb.expTopHalf,bEmb.expBotHalf});
+  bounds.overflow = truncateLSB(raw) == 1'b1
+                    &&
+                    (    exp > resetExp
+                     || (exp == resetExp && (truncateLSB(bEmb.baseUpperBits) != 2'b0))
+                     || (exp == resetExp-1 && (truncateLSB(bEmb.baseUpperBits) != 1'b0))
+                    );
+  Bool embeddedExp = (truncateLSB(raw)==1'b1 && !bounds.overflow);
+  Format format    = (embeddedExp) ? EmbeddedExp : Exp0;
   Bit#(HalfExpW) halfExp0 = 0;
 
   case (format)
     EmbeddedExp: begin
-      BoundsEmbeddedExp b = unpack(raw);
-      bounds.exp          = unpack({b.expTopHalf,b.expBotHalf});
-      bounds.topBits      = {?,b.topUpperBits,halfExp0}; // will supply the top
-                                                         // two bits later.
-      bounds.baseBits     = {b.baseUpperBits,halfExp0};
+      bounds.exp      = exp;
+      bounds.topBits  = {?,bEmb.topUpperBits,halfExp0}; // will supply the top two bits later.
+      bounds.baseBits = {bEmb.baseUpperBits,halfExp0};
     end
     default: begin // and Exp0
       bounds.exp      = 0;
-      BoundsExp0 b    = unpack(raw);
-      bounds.topBits  = {?,b.top}; // will supply the top two bits later.
-      bounds.baseBits = b.base;
+      bounds.topBits  = {?,b0.top}; // will supply the top two bits later.
+      bounds.baseBits = b0.base;
     end
   endcase
   // topBits = baseBits + lengthBits.
@@ -816,7 +821,7 @@ function CBounds encBounds (Format format, Bounds bounds);
   Bit#(TSub#(MW,HalfExpW))         eExpBase = truncateLSB(bounds.baseBits);
 
   return case (format)
-           Exp0: {1'b0, truncate(bounds.topBits), bounds.baseBits};
+           Exp0: {pack(bounds.overflow), truncate(bounds.topBits), bounds.baseBits};
            EmbeddedExp: {1'b1, eExpTop, hiExpBits, eExpBase, loExpBits};
          endcase;
 endfunction
@@ -1077,10 +1082,8 @@ instance CHERICap #(CapReg, OTypeW, FlagsW, CapAddrW, CapW, TSub#(MW, 3));
     (cap.bounds.exp == 0) ? cap.bounds.baseBits[1:0] : 2'b0;
 
   function isDerivable (cap) =
-    cap.bounds.exp <= resetExp &&
-    !(cap.bounds.exp == resetExp && ((truncateLSB(cap.bounds.topBits) != 1'b0) ||
-                                     (truncateLSB(cap.bounds.baseBits) != 2'b0))) &&
-    !(cap.bounds.exp == resetExp-1 && (truncateLSB(cap.bounds.baseBits) != 1'b0)) &&
+    (!cap.bounds.overflow) &&
+    !(cap.bounds.exp == resetExp && truncateLSB(cap.bounds.topBits) == 1'b1) &&
     (cap.reserved == 0);
 
 endinstance
